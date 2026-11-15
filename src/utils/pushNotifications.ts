@@ -10,6 +10,8 @@ export interface PushPrefs {
 }
 
 const PREFS_KEY = 'gb_admin_push_prefs_v1';
+const NATIVE_PERM_CACHE_KEY = 'gb_admin_native_perm_v1';
+const ANDROID_CHANNEL_ID = 'gb-admin-alerts';
 
 export const DEFAULT_PUSH_PREFS: PushPrefs = {
   enabled: true,
@@ -19,6 +21,138 @@ export const DEFAULT_PUSH_PREFS: PushPrefs = {
   payoutsAndWallets: true,
   helplineAndSos: true,
 };
+
+interface CapacitorLocalNotifPlugin {
+  checkPermissions: () => Promise<{ display?: string }>;
+  requestPermissions: () => Promise<{ display?: string }>;
+  createChannel?: (opts: {
+    id: string;
+    name: string;
+    description?: string;
+    importance?: number;
+    visibility?: number;
+    vibration?: boolean;
+  }) => Promise<void>;
+  schedule: (opts: {
+    notifications: Array<{
+      id: number;
+      title: string;
+      body: string;
+      channelId?: string;
+      extra?: Record<string, string>;
+    }>;
+  }) => Promise<void>;
+  addListener?: (
+    eventName: string,
+    cb: (action: {
+      notification?: { extra?: { panel?: AdminPanelId; orderId?: string } };
+    }) => void
+  ) => Promise<{ remove: () => void }>;
+}
+
+function getCapacitorLocalNotifications(): CapacitorLocalNotifPlugin | null {
+  if (typeof window === 'undefined') return null;
+  const cap = (
+    window as unknown as {
+      Capacitor?: {
+        isNativePlatform?: () => boolean;
+        Plugins?: { LocalNotifications?: CapacitorLocalNotifPlugin };
+      };
+    }
+  ).Capacitor;
+
+  if (cap?.isNativePlatform?.() && cap.Plugins?.LocalNotifications) {
+    return cap.Plugins.LocalNotifications;
+  }
+  return null;
+}
+
+function mapCapacitorPerm(display?: string): NotificationPermission {
+  if (display === 'granted') return 'granted';
+  if (display === 'denied') return 'denied';
+  return 'default';
+}
+
+function readCachedNativePerm(): NotificationPermission {
+  try {
+    const val = localStorage.getItem(NATIVE_PERM_CACHE_KEY);
+    if (val === 'granted' || val === 'denied' || val === 'default') {
+      return val;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return 'default';
+}
+
+function writeCachedNativePerm(perm: NotificationPermission): void {
+  try {
+    localStorage.setItem(NATIVE_PERM_CACHE_KEY, perm);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+let cachedNativePerm: NotificationPermission = readCachedNativePerm();
+let channelReady = false;
+let nativeBootstrapStarted = false;
+
+async function ensureAndroidChannel(
+  plugin: CapacitorLocalNotifPlugin
+): Promise<void> {
+  if (channelReady || !plugin.createChannel) return;
+  try {
+    await plugin.createChannel({
+      id: ANDROID_CHANNEL_ID,
+      name: 'Gossaigaon Bazar Admin Alerts',
+      description: 'Live alerts for New Orders, UPI Proofs, SOS & Payouts',
+      importance: 5,
+      visibility: 1,
+      vibration: true,
+    });
+    channelReady = true;
+  } catch {
+    // ignore on unsupported platforms
+  }
+}
+
+function bootstrapNativePush(): void {
+  if (nativeBootstrapStarted) return;
+  const nativePlugin = getCapacitorLocalNotifications();
+  if (!nativePlugin) return;
+  nativeBootstrapStarted = true;
+
+  void ensureAndroidChannel(nativePlugin);
+
+  void nativePlugin
+    .checkPermissions()
+    .then((res) => {
+      cachedNativePerm = mapCapacitorPerm(res?.display);
+      writeCachedNativePerm(cachedNativePerm);
+    })
+    .catch(() => {
+      // keep fallback
+    });
+
+  if (nativePlugin.addListener) {
+    void nativePlugin
+      .addListener('localNotificationActionPerformed', (action) => {
+        const extra = action?.notification?.extra;
+        if (extra?.panel) {
+          window.dispatchEvent(
+            new CustomEvent('gb-push-navigate', {
+              detail: { panel: extra.panel, orderId: extra.orderId || '' },
+            })
+          );
+        }
+      })
+      .catch(() => {
+        // ignore listener failure
+      });
+  }
+}
+
+bootstrapNativePush();
 
 export function loadPushPrefs(): PushPrefs {
   try {
@@ -38,20 +172,51 @@ export function savePushPrefs(prefs: PushPrefs): void {
   }
 }
 
-export function getNotificationPermissionState(): NotificationPermission | 'unsupported' {
-  if (typeof window === 'undefined' || !('Notification' in window)) {
+export function getNotificationPermissionState():
+  | NotificationPermission
+  | 'unsupported' {
+  if (typeof window === 'undefined') return 'unsupported';
+  const nativePlugin = getCapacitorLocalNotifications();
+  if (nativePlugin) {
+    bootstrapNativePush();
+    void nativePlugin
+      .checkPermissions()
+      .then((res) => {
+        cachedNativePerm = mapCapacitorPerm(res?.display);
+        writeCachedNativePerm(cachedNativePerm);
+      })
+      .catch(() => {});
+    return cachedNativePerm;
+  }
+  if (!('Notification' in window)) {
     return 'unsupported';
   }
   return Notification.permission;
 }
 
-export async function requestPushPermission(): Promise<NotificationPermission | 'unsupported'> {
+export async function requestPushPermission(): Promise<
+  NotificationPermission | 'unsupported'
+> {
+  const nativePlugin = getCapacitorLocalNotifications();
+  if (nativePlugin) {
+    try {
+      await ensureAndroidChannel(nativePlugin);
+      const res = await nativePlugin.requestPermissions();
+      cachedNativePerm = mapCapacitorPerm(res?.display);
+      writeCachedNativePerm(cachedNativePerm);
+      return cachedNativePerm;
+    } catch {
+      cachedNativePerm = 'denied';
+      writeCachedNativePerm('denied');
+      return 'denied';
+    }
+  }
+
   if (typeof window === 'undefined' || !('Notification' in window)) {
     return 'unsupported';
   }
   try {
-    const result = await Notification.requestPermission();
-    return result;
+    return await Notification.requestPermission();
   } catch {
     return Notification.permission;
   }
@@ -66,11 +231,46 @@ export interface SendPushOptions {
   requireInteraction?: boolean;
 }
 
-export async function dispatchAdminPushNotification(opts: SendPushOptions): Promise<boolean> {
+export async function dispatchAdminPushNotification(
+  opts: SendPushOptions
+): Promise<boolean> {
+  const nativePlugin = getCapacitorLocalNotifications();
+  if (nativePlugin) {
+    try {
+      const perm = await nativePlugin.checkPermissions();
+      const mapped = mapCapacitorPerm(perm?.display);
+      cachedNativePerm = mapped;
+      writeCachedNativePerm(mapped);
+      if (mapped !== 'granted') return false;
+
+      await ensureAndroidChannel(nativePlugin);
+      await nativePlugin.schedule({
+        notifications: [
+          {
+            id: Math.floor((Date.now() % 2000000000) + Math.random() * 1000),
+            title: opts.title,
+            body: opts.body,
+            channelId: ANDROID_CHANNEL_ID,
+            extra: {
+              panel: opts.panel,
+              orderId: opts.orderId || '',
+            },
+          },
+        ],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   if (typeof window === 'undefined' || !('Notification' in window)) return false;
   if (Notification.permission !== 'granted') return false;
 
-  const notifOptions: NotificationOptions & { vibrate?: number[]; renotify?: boolean } = {
+  const notifOptions: NotificationOptions & {
+    vibrate?: number[];
+    renotify?: boolean;
+  } = {
     body: opts.body,
     icon: '/pwa-192x192.png',
     badge: '/pwa-192x192.png',
