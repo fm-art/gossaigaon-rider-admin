@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies & Capacitor
         run: |
           bun install
-          bun add @capacitor/core @capacitor/android
+          bun add @capacitor/core @capacitor/android @capacitor/local-notifications
           bun add -d @capacitor/cli
 
       - name: Build Vite Web App
