@@ -5,7 +5,7 @@ on:
     branches:
       - main
       - master
-  workflow_dispatch: # GitHub Actions tab se manually bhi run kar sakte hain
+  workflow_dispatch:
 
 jobs:
   build-apk:
@@ -20,6 +20,9 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
@@ -28,21 +31,21 @@ jobs:
 
       - name: Install dependencies & Capacitor
         run: |
-          npm install
-          npm install @capacitor/core @capacitor/android
-          npm install -D @capacitor/cli
+          bun install
+          bun add @capacitor/core @capacitor/android
+          bun add -d @capacitor/cli
 
       - name: Build Vite Web App
         env:
           VITE_GOOGLE_MAPS_API_KEY: ${{ secrets.VITE_GOOGLE_MAPS_API_KEY }}
-        run: npm run build
+        run: bun run build
 
       - name: Add & Sync Android Platform
         run: |
           if [ ! -d "android" ]; then
-            npx cap add android
+            bunx cap add android
           fi
-          npx cap sync android
+          bunx cap sync android
           cp google-services.json android/app/google-services.json || true
 
       - name: Build Debug APK
